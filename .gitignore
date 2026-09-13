@@ -1,0 +1,6 @@
+# Runtime data and local credentials
+.DS_Store
+logs/
+dist/
+*.jsonl
+.env
