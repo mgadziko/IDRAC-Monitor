@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Thermal Monitor
+Comment=GPU telemetry and iDRAC thermal monitoring
+Icon=org.gnome.SystemMonitor
+Exec=python3 @APP_PATH@
+Terminal=false
+StartupNotify=true
+StartupWMClass=ThermalMonitor
+Categories=System;Monitor;
