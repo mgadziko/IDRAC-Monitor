@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import configparser
 import os
+import socket
 import sys
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -44,7 +46,9 @@ from monitor_core import (
 DEFAULT_BMC_HOST = "192.168.4.122"
 DEFAULT_BMC_USER = "root"
 POLL_SECONDS = 10
-BMC_POLL_SECONDS = 10
+# iDRAC has a small RMCP+ session pool.  Thirty seconds keeps the live
+# telemetry useful without repeatedly competing for a session.
+BMC_POLL_SECONDS = 30
 BMC_MAX_BACKOFF_SECONDS = 300
 GPU_TEMPERATURE_WARNING_C = 75
 GPU_TEMPERATURE_CRITICAL_C = 80
@@ -74,6 +78,7 @@ class ThermalMonitor(Gtk.Application):
         self.latest_gpus: list[dict[str, Any]] = []
         self.fan_temperatures: list[int] = list(DEFAULT_FAN_TEMPERATURES)
         self.fan_rpms: list[int] = list(DEFAULT_FAN_RPMS)
+        self.fan_curve_autosave_source: int | None = None
         self.target_fan_rpm = 0
         self.cool_samples = 0
         self.applied_fan_duty: int | None = None
@@ -97,7 +102,12 @@ class ThermalMonitor(Gtk.Application):
         self.keyring_available = credential_store.is_available()
 
     def do_activate(self) -> None:
-        self.window = Gtk.ApplicationWindow(application=self, title="Thermal Monitor")
+        hostname = socket.gethostname()
+        machine_name = {"whitelotus": "WhiteLotus"}.get(
+            hostname.casefold(), hostname
+        )
+        self.window_title = f"Dell iDRAC 8 Thermal Monitor: {machine_name}"
+        self.window = Gtk.ApplicationWindow(application=self, title=self.window_title)
         self.window.set_default_size(920, 790)
         self._build_ui()
         self.window.connect("close-request", self._on_window_close_request)
@@ -119,17 +129,10 @@ class ThermalMonitor(Gtk.Application):
         content_scroller.set_child(root)
         self.window.set_child(content_scroller)
 
-        heading = Gtk.Label(label="Thermal Monitor")
+        heading = Gtk.Label(label=self.window_title)
         heading.add_css_class("title-1")
         heading.set_xalign(0)
         root.append(heading)
-
-        notice = Gtk.Label(
-            label="Fan control is opt-in. When stopped or quit, fans remain manual at the last set speed."
-        )
-        notice.add_css_class("gpu-notice")
-        notice.set_xalign(0)
-        root.append(notice)
 
         gpu_frame = Gtk.Frame(label="NVIDIA GPU telemetry")
         root.append(gpu_frame)
@@ -168,7 +171,7 @@ class ThermalMonitor(Gtk.Application):
 
         connection = Gtk.Frame(label="BMC sensor connection")
         root.append(connection)
-        form = Gtk.Grid(column_spacing=8, row_spacing=6)
+        form = Gtk.Grid(column_spacing=6, row_spacing=6)
         form.set_margin_top(6)
         form.set_margin_bottom(6)
         form.set_margin_start(12)
@@ -178,47 +181,40 @@ class ThermalMonitor(Gtk.Application):
         form.attach(Gtk.Label(label="BMC address", xalign=0), 0, 0, 1, 1)
         self.host_entry = Gtk.Entry()
         self.host_entry.set_text(DEFAULT_BMC_HOST)
-        self.host_entry.set_hexpand(True)
+        self.host_entry.set_width_chars(14)
         form.attach(self.host_entry, 1, 0, 1, 1)
 
         form.attach(Gtk.Label(label="Account", xalign=0), 2, 0, 1, 1)
         self.user_entry = Gtk.Entry()
         self.user_entry.set_text(DEFAULT_BMC_USER)
+        self.user_entry.set_width_chars(10)
         form.attach(self.user_entry, 3, 0, 1, 1)
 
-        form.attach(Gtk.Label(label="Password", xalign=0), 0, 1, 1, 1)
+        form.attach(Gtk.Label(label="Password", xalign=0), 4, 0, 1, 1)
         self.password_entry = Gtk.PasswordEntry()
-        self.password_entry.set_hexpand(True)
-        form.attach(self.password_entry, 1, 1, 3, 1)
+        self.password_entry.set_width_chars(15)
+        form.attach(self.password_entry, 5, 0, 1, 1)
 
-        self.remember_password = Gtk.CheckButton(label="Save password in desktop keyring")
+        self.remember_password = Gtk.CheckButton(label="Save Password")
         self.remember_password.set_active(True)
         self.remember_password.set_sensitive(self.keyring_available)
 
-        self.launch_at_startup = Gtk.CheckButton(label="Launch app at desktop login")
-        self.start_automatic_at_launch = Gtk.CheckButton(
-            label="Start fan curve control on app launch"
-        )
+        self.launch_at_startup = Gtk.CheckButton(label="Launch on Login")
+        self.start_automatic_at_launch = Gtk.CheckButton(label="Start on Current Curve")
         self.start_automatic_at_launch.set_tooltip_text(
             "Opt in to the saved fan curve when the app launches. Quitting leaves manual control at the current speed."
         )
-        options = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
-        options.append(self.remember_password)
-        options.append(self.launch_at_startup)
-        options.append(self.start_automatic_at_launch)
-
-        settings_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        settings_row.append(options)
-        fan_panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
-        fan_panel.add_css_class("fan-panel")
-        fan_title = Gtk.Label(label="Fan RPM", xalign=0)
-        fan_title.add_css_class("sensor-header")
-        fan_panel.append(fan_title)
-        self.fan_grid = Gtk.Grid(column_spacing=6, row_spacing=4)
-        self.fan_grid.set_hexpand(True)
-        fan_panel.append(self.fan_grid)
-        settings_row.append(fan_panel)
-        form.attach(settings_row, 0, 2, 5, 1)
+        controls = Gtk.Frame(label="Controls")
+        controls_grid = Gtk.Grid(column_spacing=12, row_spacing=8)
+        controls_grid.set_margin_top(6)
+        controls_grid.set_margin_bottom(6)
+        controls_grid.set_margin_start(12)
+        controls_grid.set_margin_end(12)
+        controls.set_child(controls_grid)
+        root.append(controls)
+        controls_grid.attach(self.remember_password, 0, 0, 1, 1)
+        controls_grid.attach(self.launch_at_startup, 1, 0, 1, 1)
+        controls_grid.attach(self.start_automatic_at_launch, 2, 0, 1, 1)
 
         button_contents = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         self.refresh_spinner = Gtk.Spinner()
@@ -228,7 +224,17 @@ class ThermalMonitor(Gtk.Application):
         self.refresh_button = Gtk.Button()
         self.refresh_button.set_child(button_contents)
         self.refresh_button.connect("clicked", lambda _button: self.refresh(force_bmc=True))
-        form.attach(self.refresh_button, 4, 0, 1, 2)
+        apply_curve = Gtk.Button(label="Apply Settings")
+        apply_curve.connect("clicked", lambda _button: self._apply_fan_curve())
+        self.start_control_button = Gtk.Button(label="Start Fan Control")
+        self.start_control_button.connect("clicked", lambda _button: self._start_fan_control())
+        self.stop_control_button = Gtk.Button(label="Stop (leave speed)")
+        self.stop_control_button.set_sensitive(False)
+        self.stop_control_button.connect("clicked", lambda _button: self._stop_fan_control())
+        controls_grid.attach(apply_curve, 0, 1, 1, 1)
+        controls_grid.attach(self.start_control_button, 1, 1, 1, 1)
+        controls_grid.attach(self.stop_control_button, 2, 1, 1, 1)
+        controls_grid.attach(self.refresh_button, 3, 1, 1, 1)
 
         curve_frame = Gtk.Frame(label="Fan curve settings")
         curve_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
@@ -236,7 +242,9 @@ class ThermalMonitor(Gtk.Application):
         curve_box.set_margin_bottom(6)
         curve_box.set_margin_start(12)
         curve_box.set_margin_end(12)
-        self.curve_grid = Gtk.Grid(column_spacing=14, row_spacing=8)
+        curve_layout = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
+        self.curve_grid = Gtk.Grid(column_spacing=10, row_spacing=8)
+        self.curve_grid.set_hexpand(True)
         self.curve_temperature_entries: list[Gtk.Entry] = []
         self.curve_rpm_entries: list[Gtk.Entry] = []
         for index in range(8):
@@ -245,9 +253,9 @@ class ThermalMonitor(Gtk.Application):
             tier.attach(Gtk.Label(label="Temperature °C", xalign=0), 0, 1, 1, 1)
             tier.attach(Gtk.Label(label="Target RPM", xalign=0), 1, 1, 1, 1)
             temp_entry = Gtk.Entry()
-            temp_entry.set_width_chars(7)
+            temp_entry.set_width_chars(4)
             rpm_entry = Gtk.Entry()
-            rpm_entry.set_width_chars(7)
+            rpm_entry.set_width_chars(4)
             self.curve_temperature_entries.append(temp_entry)
             self.curve_rpm_entries.append(rpm_entry)
             pair = Gtk.Grid(column_spacing=6)
@@ -262,26 +270,23 @@ class ThermalMonitor(Gtk.Application):
             tier.attach(pair_frame, 0, 2, 2, 1)
             # Place curve points 1,3,5,7 across the first row and 2,4,6,8 below.
             self.curve_grid.attach(tier, index // 2, index % 2, 1, 1)
-        curve_box.append(self.curve_grid)
-        curve_actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        curve_layout.append(self.curve_grid)
+        fan_panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+        fan_panel.add_css_class("fan-panel")
+        fan_panel.set_valign(Gtk.Align.START)
+        fan_title = Gtk.Label(label="Fan RPM", xalign=0)
+        fan_title.add_css_class("sensor-header")
+        fan_panel.append(fan_title)
+        self.fan_grid = Gtk.Grid(column_spacing=6, row_spacing=4)
+        fan_panel.append(self.fan_grid)
+        curve_layout.append(fan_panel)
         curve_note = Gtk.Label(
             label="Start applies the selected curve; Stop/quit leaves manual control at the current speed.",
             xalign=0,
         )
         curve_note.add_css_class("muted")
-        curve_note.set_hexpand(True)
-        curve_actions.append(curve_note)
-        apply_curve = Gtk.Button(label="Apply Settings")
-        apply_curve.connect("clicked", lambda _button: self._apply_fan_curve())
-        curve_actions.append(apply_curve)
-        self.start_control_button = Gtk.Button(label="Start Fan Control")
-        self.start_control_button.connect("clicked", lambda _button: self._start_fan_control())
-        curve_actions.append(self.start_control_button)
-        self.stop_control_button = Gtk.Button(label="Stop (leave speed)")
-        self.stop_control_button.set_sensitive(False)
-        self.stop_control_button.connect("clicked", lambda _button: self._stop_fan_control())
-        curve_actions.append(self.stop_control_button)
-        curve_box.append(curve_actions)
+        curve_box.append(curve_layout)
+        curve_box.append(curve_note)
         curve_frame.set_child(curve_box)
         root.append(curve_frame)
 
@@ -290,6 +295,8 @@ class ThermalMonitor(Gtk.Application):
         root.append(self.status)
 
         self._load_settings()
+        for entry in [*self.curve_temperature_entries, *self.curve_rpm_entries]:
+            entry.connect("changed", lambda _entry: self._queue_fan_curve_autosave())
         self.remember_password.connect("toggled", self._on_remember_password_toggled)
         self.launch_at_startup.connect("toggled", self._on_launch_at_startup_toggled)
         self.start_automatic_at_launch.connect("toggled", self._on_start_fan_control_toggled)
@@ -311,6 +318,9 @@ class ThermalMonitor(Gtk.Application):
             progressbar.gpu-meter.critical progress { background: #ec5f6d; }
             .fan-panel { background-color: #211819; border: 1px solid #493236; border-radius: 8px; padding: 8px; }
             .fan-panel label { color: #f2b5b7; }
+            .fan-panel label.fan-rpm-green { color: #40c77a; font-weight: bold; }
+            .fan-panel label.fan-rpm-amber { color: #e4ad4a; font-weight: bold; }
+            .fan-panel label.fan-rpm-red { color: #ec5f6d; font-weight: bold; }
             .sensor-header { font-weight: bold; }
             .muted { color: #666; }
         """)
@@ -383,9 +393,30 @@ class ThermalMonitor(Gtk.Application):
 
     def _write_config(self, parser: configparser.ConfigParser) -> None:
         CONFIG_FILE.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        with CONFIG_FILE.open("w", encoding="utf-8") as settings:
-            parser.write(settings)
-        os.chmod(CONFIG_FILE, 0o600)
+        # Write a complete replacement first, then atomically swap it into
+        # place.  A close, crash, or power interruption cannot leave a
+        # partially written settings file that falls back to default values.
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix="settings-", suffix=".ini", dir=CONFIG_FILE.parent
+        )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as settings:
+                parser.write(settings)
+                settings.flush()
+                os.fsync(settings.fileno())
+            os.chmod(temporary_name, 0o600)
+            os.replace(temporary_name, CONFIG_FILE)
+            directory_descriptor = os.open(CONFIG_FILE.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_descriptor)
+            finally:
+                os.close(directory_descriptor)
+        except Exception:
+            try:
+                os.unlink(temporary_name)
+            except FileNotFoundError:
+                pass
+            raise
 
     def _restore_window_position(self) -> bool:
         if self.window_geometry is None:
@@ -427,6 +458,9 @@ class ThermalMonitor(Gtk.Application):
         self.saved_window_position = position
 
     def _on_window_close_request(self, _window: Gtk.Window) -> bool:
+        # Preserve a complete, valid curve even if the user closes the window
+        # without pressing the explicit Apply Settings button.
+        self._apply_fan_curve(report_result=False)
         self._save_window_position()
         return False
 
@@ -447,15 +481,29 @@ class ThermalMonitor(Gtk.Application):
         self._write_config(parser)
         self.saved_settings = current
 
-    def _apply_fan_curve(self) -> bool:
+    def _queue_fan_curve_autosave(self) -> None:
+        """Persist a valid edited curve shortly after typing stops."""
+        if self.fan_curve_autosave_source is not None:
+            GLib.source_remove(self.fan_curve_autosave_source)
+        self.fan_curve_autosave_source = GLib.timeout_add(
+            700, self._autosave_fan_curve
+        )
+
+    def _autosave_fan_curve(self) -> bool:
+        self.fan_curve_autosave_source = None
+        self._apply_fan_curve(report_result=False)
+        return GLib.SOURCE_REMOVE
+
+    def _apply_fan_curve(self, report_result: bool = True) -> bool:
         try:
             temperatures, rpms = validate_fan_curve(
                 [entry.get_text() for entry in self.curve_temperature_entries],
                 [entry.get_text() for entry in self.curve_rpm_entries],
             )
         except ValueError as exc:
-            self.status.set_text(f"Fan curve not saved: {exc}")
-            self.status.add_css_class("error")
+            if report_result:
+                self.status.set_text(f"Fan curve not saved: {exc}")
+                self.status.add_css_class("error")
             return False
 
         self._save_settings()
@@ -468,8 +516,13 @@ class ThermalMonitor(Gtk.Application):
         self.fan_temperatures = temperatures
         self.fan_rpms = rpms
         self._sync_autostart(remove_when_disabled=True)
-        self.bmc_status = "fan curve saved"
-        self._render_status()
+        if report_result:
+            summary = ", ".join(
+                f"{temperature}\N{DEGREE SIGN}C→{rpm} RPM"
+                for temperature, rpm in zip(temperatures, rpms)
+            )
+            self.bmc_status = f"fan curve saved: {summary}"
+            self._render_status()
         return True
 
     def _start_fan_control(self) -> None:
@@ -896,6 +949,16 @@ class ThermalMonitor(Gtk.Application):
         if severity != "normal":
             meter.add_css_class(severity)
 
+    def _fan_rpm_color_class(self, rpm: float | None) -> str | None:
+        """Classify a live fan reading by the saved eight-tier curve."""
+        if rpm is None or len(self.fan_rpms) < 8:
+            return None
+        if rpm <= self.fan_rpms[3]:
+            return "fan-rpm-green"
+        if rpm <= self.fan_rpms[5]:
+            return "fan-rpm-amber"
+        return "fan-rpm-red"
+
     def _render_sensors(self, sensors: list[dict[str, str]]) -> None:
         while child := self.fan_grid.get_first_child():
             self.fan_grid.remove(child)
@@ -919,22 +982,30 @@ class ThermalMonitor(Gtk.Application):
             self.fan_grid.attach(Gtk.Label(label="No fan RPM readings."), 0, 0, 1, 1)
             return
 
-        def attach_sensor(sensor: dict[str, str], column: int, row: int) -> None:
+        def attach_sensor(sensor: dict[str, str], row: int) -> None:
             name = Gtk.Label(label=sensor["name"], xalign=0)
             name.set_size_request(54, -1)
             value = Gtk.Label(label=sensor["reading"], xalign=1)
             value.set_size_request(76, -1)
+            rpm_color = self._fan_rpm_color_class(
+                parse_temperature_c(sensor["reading"])
+            )
+            if rpm_color:
+                value.add_css_class(rpm_color)
             state = Gtk.Label(label=sensor["status"], xalign=1)
             state.add_css_class("muted")
             state.set_size_request(28, -1)
-            self.fan_grid.attach(name, column, row, 1, 1)
-            self.fan_grid.attach(value, column + 1, row, 1, 1)
-            self.fan_grid.attach(state, column + 2, row, 1, 1)
+            # Keep the status with its preceding Fan/RPM pair rather than
+            # visually attaching it to the following fan group.
+            state.set_margin_end(14)
+            self.fan_grid.attach(name, 0, row, 1, 1)
+            self.fan_grid.attach(value, 1, row, 1, 1)
+            self.fan_grid.attach(state, 2, row, 1, 1)
 
         for sensor in fan_sensors:
             position = fan_sensor_grid_position(sensor["name"])
-            column, row = position
-            attach_sensor(sensor, column * 3, row)
+            column, pair_row = position
+            attach_sensor(sensor, column * 2 + pair_row)
 
     def do_shutdown(self) -> None:
         # Deliberately send no mode-reset or duty command: the BMC stays in
