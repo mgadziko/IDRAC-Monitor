@@ -35,9 +35,11 @@ from monitor_core import (
     fan_control_autostart_ready,
     fan_sensor_grid_position,
     gpu_bar_state,
+    normalize_sensor_name,
     parse_temperature_c,
     query_gpus,
     query_ipmi,
+    temperature_sensor_key,
     set_ipmi_fan_control,
     validate_fan_curve,
 )
@@ -56,6 +58,7 @@ GPU_POWER_WARNING_FRACTION = 0.90
 GPU_UTILIZATION_WARNING_PERCENT = 80
 GPU_MEMORY_WARNING_FRACTION = 0.85
 BMC_TEMPERATURE_BAR_MAX_C = 80
+BMC_CPU_TEMPERATURE_BAR_MAX_C = 100
 CONFIG_FILE = Path.home() / ".config" / "thermal-monitor" / "settings.ini"
 AUTOSTART_FILE = Path.home() / ".config" / "autostart" / "thermal-monitor.desktop"
 APP_SCRIPT = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "thermal-monitor" / "thermal_monitor.py"
@@ -84,7 +87,9 @@ class ThermalMonitor(Gtk.Application):
         self.applied_fan_duty: int | None = None
         self.password = ""
         self.gpu_rows: list[dict[str, dict[str, Gtk.Widget]]] = []
-        self.bmc_temperature_rows: dict[str, tuple[Gtk.Label, Gtk.ProgressBar]] = {}
+        self.bmc_temperature_rows: dict[
+            str, tuple[Gtk.Label, Gtk.ProgressBar, int]
+        ] = {}
         self.saved_settings: tuple[str, str, bool, bool, bool] | None = None
         self.saved_window_position: tuple[int, int] | None = None
         self.window_position_candidate: tuple[int, int] | None = None
@@ -102,11 +107,7 @@ class ThermalMonitor(Gtk.Application):
         self.keyring_available = credential_store.is_available()
 
     def do_activate(self) -> None:
-        hostname = socket.gethostname()
-        machine_name = {"whitelotus": "WhiteLotus"}.get(
-            hostname.casefold(), hostname
-        )
-        self.window_title = f"Dell iDRAC 8 Thermal Monitor: {machine_name}"
+        self.window_title = f"Dell iDRAC 8 Thermal Monitor: {socket.gethostname()}"
         self.window = Gtk.ApplicationWindow(application=self, title=self.window_title)
         self.window.set_default_size(920, 790)
         self._build_ui()
@@ -144,28 +145,38 @@ class ThermalMonitor(Gtk.Application):
         gpu_frame.set_child(self.gpu_grid)
 
         bmc_temperature_frame = Gtk.Frame(
-            label=f"Inlet and exhaust temperatures (bar scale: 0–{BMC_TEMPERATURE_BAR_MAX_C} °C)"
+            label="Environmental temperatures"
         )
         bmc_temperature_grid = Gtk.Grid(column_spacing=18, row_spacing=6)
         bmc_temperature_grid.set_margin_top(6)
         bmc_temperature_grid.set_margin_bottom(6)
         bmc_temperature_grid.set_margin_start(12)
         bmc_temperature_grid.set_margin_end(12)
-        for column, (key, title) in enumerate(
-            (("Inlet Temp", "Inlet"), ("Exhaust Temp", "Exhaust"))
+        for column, (cpu_key, cpu_title, env_key, env_title) in enumerate(
+            (
+                ("CPU1 Temp", "CPU 1", "Inlet Temp", "Inlet"),
+                ("CPU2 Temp", "CPU 2", "Exhaust Temp", "Exhaust"),
+            )
         ):
-            panel = Gtk.Grid(column_spacing=8, row_spacing=5)
-            panel.set_hexpand(True)
-            value = Gtk.Label(label="—", xalign=1)
-            value.add_css_class("gpu-value")
-            panel.attach(Gtk.Label(label=title, xalign=0), 0, 0, 1, 1)
-            panel.attach(value, 1, 0, 1, 1)
-            meter = Gtk.ProgressBar()
-            meter.add_css_class("gpu-meter")
-            meter.set_hexpand(True)
-            panel.attach(meter, 0, 1, 2, 1)
-            bmc_temperature_grid.attach(panel, column, 0, 1, 1)
-            self.bmc_temperature_rows[key] = (value, meter)
+            stack = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+            stack.set_hexpand(True)
+            for key, title, scale_max in (
+                (cpu_key, cpu_title, BMC_CPU_TEMPERATURE_BAR_MAX_C),
+                (env_key, env_title, BMC_TEMPERATURE_BAR_MAX_C),
+            ):
+                panel = Gtk.Grid(column_spacing=8, row_spacing=5)
+                panel.set_hexpand(True)
+                value = Gtk.Label(label="—", xalign=1)
+                value.add_css_class("gpu-value")
+                panel.attach(Gtk.Label(label=title, xalign=0), 0, 0, 1, 1)
+                panel.attach(value, 1, 0, 1, 1)
+                meter = Gtk.ProgressBar()
+                meter.add_css_class("gpu-meter")
+                meter.set_hexpand(True)
+                panel.attach(meter, 0, 1, 2, 1)
+                stack.append(panel)
+                self.bmc_temperature_rows[key] = (value, meter, scale_max)
+            bmc_temperature_grid.attach(stack, column, 0, 1, 1)
         bmc_temperature_frame.set_child(bmc_temperature_grid)
         root.append(bmc_temperature_frame)
 
@@ -962,12 +973,15 @@ class ThermalMonitor(Gtk.Application):
     def _render_sensors(self, sensors: list[dict[str, str]]) -> None:
         while child := self.fan_grid.get_first_child():
             self.fan_grid.remove(child)
-        for name, (value_label, meter) in self.bmc_temperature_rows.items():
-            sensor = next((item for item in sensors if item["name"].casefold() == name.casefold()), None)
+        sensors_by_name = {
+            temperature_sensor_key(item): item for item in sensors
+        }
+        for name, (value_label, meter, scale_max) in self.bmc_temperature_rows.items():
+            sensor = sensors_by_name.get(normalize_sensor_name(name))
             temperature = parse_temperature_c(sensor["reading"]) if sensor else None
             value_label.set_text(display_number(temperature, " °C"))
             fraction, _severity = gpu_bar_state(
-                temperature, BMC_TEMPERATURE_BAR_MAX_C, None, None
+                temperature, scale_max, None, None
             )
             meter.set_fraction(fraction)
             meter.remove_css_class("warning")

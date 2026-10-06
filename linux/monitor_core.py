@@ -37,6 +37,11 @@ def parse_temperature_c(reading: str) -> float | None:
     return float(match.group(0)) if match else None
 
 
+def normalize_sensor_name(name: str) -> str:
+    """Normalize BMC labels so CPU 1 and CPU1 spellings match."""
+    return "".join(character for character in name.casefold() if character.isalnum())
+
+
 def fan_sensor_grid_position(name: str) -> tuple[int, int] | None:
     """Return (column, row) for fans 1,3,5 above 2,4,6."""
     match = re.match(r"fan\s*(\d+)", name.strip(), re.IGNORECASE)
@@ -186,10 +191,24 @@ def parse_ipmi_sensors(output: str) -> list[dict[str, str]]:
         # final column. Prefer that engineering value when present; older or
         # abbreviated output formats still use the second column.
         reading = fields[-1] if len(fields) >= 5 else fields[1]
-        sensors.append(
-            {"name": fields[0], "reading": reading, "status": fields[2]}
-        )
+        sensor = {"name": fields[0], "reading": reading, "status": fields[2]}
+        if len(fields) >= 5 and re.fullmatch(r"[0-9a-f]{2}h", fields[1], re.IGNORECASE):
+            sensor["sensor_id"] = fields[1].casefold()
+        sensors.append(sensor)
     return sensors
+
+
+def temperature_sensor_key(sensor: dict[str, str]) -> str:
+    """Return the dashboard key for named CPU sensors or Dell R730 CPU SDR IDs."""
+    name = normalize_sensor_name(sensor.get("name", ""))
+    if name in {"cpu1temp", "cpu1temperature"}:
+        return "cpu1temp"
+    if name in {"cpu2temp", "cpu2temperature"}:
+        return "cpu2temp"
+    # Dell 13G R730 BMCs expose the socket readings as generic Temp sensors.
+    # Correlated against coretemp package readings on both supported hosts.
+    sensor_id = sensor.get("sensor_id", "").casefold()
+    return {"0eh": "cpu1temp", "0fh": "cpu2temp"}.get(sensor_id, name)
 
 
 def query_ipmi(host: str, username: str, password: str) -> list[dict[str, str]]:

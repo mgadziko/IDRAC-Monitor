@@ -9,8 +9,10 @@ from monitor_core import (
     fan_control_autostart_ready,
     fan_sensor_grid_position,
     gpu_bar_state,
+    normalize_sensor_name,
     parse_gpu_output,
     parse_ipmi_sensors,
+    temperature_sensor_key,
     parse_temperature_c,
     validate_fan_curve,
 )
@@ -58,6 +60,23 @@ class TelemetryParserTests(unittest.TestCase):
         self.assertEqual(parse_temperature_c("24 degrees C"), 24.0)
         self.assertEqual(parse_temperature_c("37.5 °C"), 37.5)
         self.assertIsNone(parse_temperature_c("No reading"))
+
+    def test_ipmi_cpu_temperature_sensor_labels_are_preserved_and_normalized(self):
+        rows = parse_ipmi_sensors(
+            "CPU1 Temp | 0Eh | ok | 3.1 | 52 degrees C\n"
+            "CPU 2 Temp | 0Fh | ok | 3.2 | 55 degrees C\n"
+        )
+        self.assertEqual([row["name"] for row in rows], ["CPU1 Temp", "CPU 2 Temp"])
+        self.assertEqual(parse_temperature_c(rows[0]["reading"]), 52.0)
+        self.assertEqual(normalize_sensor_name(rows[0]["name"]), normalize_sensor_name("CPU1 Temp"))
+        self.assertEqual(normalize_sensor_name(rows[1]["name"]), normalize_sensor_name("CPU2 Temp"))
+
+    def test_r730_generic_temperature_sdr_ids_map_to_cpu_sockets(self):
+        rows = parse_ipmi_sensors(
+            "Temp | 0Eh | ok | 3.1 | 48 degrees C\n"
+            "Temp | 0Fh | ok | 3.2 | 54 degrees C\n"
+        )
+        self.assertEqual([temperature_sensor_key(row) for row in rows], ["cpu1temp", "cpu2temp"])
 
     def test_fan_sensor_order_is_odd_then_even_by_row(self):
         self.assertEqual(fan_sensor_grid_position("Fan1"), (0, 0))

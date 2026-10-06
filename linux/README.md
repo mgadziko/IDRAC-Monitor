@@ -13,16 +13,17 @@ utilization, and VRAM. Temperature bars are amber from 75 °C and red above
 80 °C; power warns at 90% of the reported limit and turns red above it;
 utilization warns at 80%; VRAM warns at 85% and turns red if it exceeds the
 reported capacity. The bars are visual indicators only and never control GPUs.
-The BMC inlet and exhaust sensors also appear below the GPU panels with numeric
-values and bars on a shared 0–80 °C scale; those two readings are omitted from
-the detailed sensor list to avoid duplication.
+The BMC CPU1 and CPU2 temperatures appear above the inlet and exhaust readings,
+respectively, within the **Environmental temperatures** section. CPU bars use a
+0–100 °C scale; inlet/exhaust bars use a 0–80 °C scale. Those four readings are
+omitted from the detailed sensor list to avoid duplication.
 The window opens at 920×790 with vertical scrolling for smaller displays. On
 X11 desktops it saves and restores its screen position in the user settings.
 GTK4 on Wayland does not permit applications to set or query top-level window
 positions, so that feature is unavailable there. The
 fan RPM readings appear in a dark panel to the right of the checkboxes, below
 the credentials and Refresh button. Fans are ordered 1, 3, 5 above 2, 4, 6.
-The inlet/exhaust meters are the only chassis temperature readings displayed;
+CPU1/CPU2 and inlet/exhaust temperatures are displayed in the dedicated bars;
 other generic BMC temperature sensors are omitted.
 
 ## WhiteLotus target
