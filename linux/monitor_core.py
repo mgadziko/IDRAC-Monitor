@@ -273,3 +273,25 @@ def set_ipmi_fan_control(host: str, username: str, password: str, *, duty: int |
     if proc.returncode:
         message = proc.stderr.strip() or "The BMC rejected the fan-control command."
         raise RuntimeError(message[-300:])
+
+
+def restore_ipmi_automatic_control(host: str, username: str, password: str) -> None:
+    """Return Dell iDRAC fan control to its automatic firmware policy."""
+    if not host.strip() or not username.strip() or not password:
+        raise RuntimeError("Enter the BMC address, account name, and password first.")
+    binary = shutil.which("ipmitool")
+    if not binary:
+        raise RuntimeError("ipmitool was not found; install it with the Linux package manager.")
+    env = os.environ.copy()
+    env["IPMI_PASSWORD"] = password
+    proc = subprocess.run(
+        [binary, "-I", "lanplus", "-H", host.strip(), "-U", username.strip(), "-E", "raw", "0x30", "0x30", "0x01", "0x01"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=12,
+        env=env,
+    )
+    if proc.returncode:
+        message = proc.stderr.strip() or "The BMC rejected the automatic-control command."
+        raise RuntimeError(message[-300:])

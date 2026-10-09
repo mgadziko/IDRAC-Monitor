@@ -9,8 +9,8 @@ The repository contains two independent desktop implementations:
 
 | Platform | Implementation | Primary use |
 | --- | --- | --- |
-| Windows | Windows Forms application and PowerShell tools | BlackLotus and comparable Windows hosts |
-| Linux | GTK4 / Python application in [`linux/`](linux/) | WhiteLotus, Zorin/Ubuntu, and comparable Linux hosts |
+| Windows | Windows Forms application and PowerShell tools | Comparable Windows hosts and legacy BlackLotus builds |
+| Linux | GTK4 / Python application in [`linux/`](linux/) | WhiteLotus, BlackLotus, and comparable Zorin/Ubuntu hosts |
 
 The implementations share the same safety model, but are not interchangeable:
 use the platform-specific installation and operating instructions below.
@@ -43,14 +43,13 @@ The controller raises the target promptly as the hottest GPU crosses a tier.
 It lowers a tier only after three cool samples at least 4 °C below the prior
 tier threshold, avoiding rapid fan oscillation.
 
-Important platform difference:
-
-- The Windows application provides **Restore Default Behavior** to return fan
-  control to iDRAC.
-- Linux **Stop (leave speed)** and closing the application stop further curve
-  updates but intentionally leave iDRAC in manual mode at the last commanded
-  duty. A crash has the same consequence. Restore iDRAC automatic control
-  deliberately before leaving the host unattended.
+When either desktop application is closed normally, it explicitly asks whether
+to **Restore iDRAC Automatic Control**, **Keep current manual fan speed**, or
+**Don't quit**. Restore sends Dell's iDRAC automatic-control command and the
+application stays open if that command fails; it never silently exits after a
+failed restore. **Stop (leave speed)** still stops only further curve updates
+and retains the manual duty. A crash or forced termination cannot show the
+dialog and may likewise leave iDRAC in manual mode.
 
 ## Windows
 
@@ -80,8 +79,9 @@ Do not place the password in a script, command history, or this repository.
 ## Linux
 
 The Linux port is a separate GTK4 application in [`linux/`](linux/), developed
-without changing the Windows implementation. It is tested on WhiteLotus
-(Zorin OS 18 with Tesla P40 GPUs) and is designed for Linux hosts with:
+without changing the Windows implementation. It is deployed on WhiteLotus
+(Zorin OS 18 with Tesla P40 GPUs) and BlackLotus (Zorin OS with Tesla M40
+GPUs), and is designed for Linux hosts with:
 
 - an NVIDIA driver that provides `nvidia-smi`;
 - `ipmitool` for BMC access;
@@ -90,7 +90,7 @@ without changing the Windows implementation. It is tested on WhiteLotus
   desired.
 
 The Linux dashboard refreshes GPU telemetry and active fan-curve decisions
-every 10 seconds. BMC reads also use a 10-second cadence and progressively
+every 10 seconds. BMC reads use a separate 30-second cadence and progressively
 back off after errors such as RMCP+ session exhaustion; **Refresh now** bypasses
 that backoff. GPU polling remains independent while a BMC request is in
 progress.
@@ -122,6 +122,18 @@ The installer verifies its GTK, Secret Service, `nvidia-smi`, and `ipmitool`
 requirements, copies the app to `~/.local/share/thermal-monitor`, and creates
 a launcher under `~/.local/share/applications`. It requires no root access
 and does not install system packages.
+
+### Deployed Linux targets
+
+- **WhiteLotus:** `~/.local/share/thermal-monitor`
+- **BlackLotus:** `/mnt/ssd894/ThermalMonitor`, with
+  `~/.local/share/thermal-monitor` linked to that SSD-backed copy
+
+Both deployments use the same explicit quit decision. Choose **Restore iDRAC
+Automatic Control** to return fan policy to iDRAC, **Keep current manual fan
+speed** to retain the last duty, or **Don't quit** to leave the application
+open. The restore path is confirmed before exit and keeps the application open
+if iDRAC rejects the command.
 
 For development or a direct launch:
 

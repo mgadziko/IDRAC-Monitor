@@ -1,4 +1,8 @@
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import monitor_core
 
 from monitor_core import (
     DEFAULT_FAN_RPMS,
@@ -14,6 +18,7 @@ from monitor_core import (
     parse_ipmi_sensors,
     temperature_sensor_key,
     parse_temperature_c,
+    restore_ipmi_automatic_control,
     validate_fan_curve,
 )
 
@@ -91,6 +96,15 @@ class TelemetryParserTests(unittest.TestCase):
         self.assertFalse(bmc_poll_due(True, False, 10, 70))
         self.assertTrue(bmc_poll_due(True, True, 10, 70))
         self.assertFalse(bmc_poll_due(False, True, 10, 70))
+
+    def test_restore_uses_dell_automatic_control_command(self):
+        with patch.object(monitor_core.shutil, "which", return_value="/usr/bin/ipmitool"), patch.object(
+            monitor_core.subprocess, "run", return_value=SimpleNamespace(returncode=0, stderr="")
+        ) as run:
+            restore_ipmi_automatic_control("192.168.4.122", "root", "not-a-real-password")
+        args = run.call_args.args[0]
+        self.assertEqual(args[-5:], ["raw", "0x30", "0x30", "0x01", "0x01"])
+        self.assertEqual(run.call_args.kwargs["env"]["IPMI_PASSWORD"], "not-a-real-password")
 
     def test_fan_curve_defaults_match_windows_app(self):
         temperatures, rpms = validate_fan_curve(

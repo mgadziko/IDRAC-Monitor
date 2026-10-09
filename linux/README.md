@@ -5,7 +5,7 @@ the existing repository without changing the Windows application. It displays
 NVIDIA GPU temperature, power, utilization, memory, and BMC fan/thermal sensors;
 fan-curve control is opt-in.
 GPU telemetry and fan-curve decisions refresh every 10 seconds; BMC queries are
-limited to every 10 seconds and back off progressively after errors such as
+limited to every 30 seconds and back off progressively after errors such as
 RMCP+ session exhaustion.
 
 Each GPU card shows numeric readings plus live bars for temperature, power,
@@ -63,9 +63,11 @@ mode and applies the matching target duty using the calibration and tier/hystere
 behavior from the Windows app. The controller raises tiers immediately and
 requires three cool samples at least 4 °C below the previous tier threshold to
 lower a tier. **Stop (leave speed)** stops curve updates without sending another
-fan command. Quitting behaves the same way: iDRAC remains in manual mode at the
-last commanded duty; the app does not restore automatic mode. Use the startup
-checkbox only if you explicitly want the saved curve applied at desktop login.
+fan command. When you quit, the app explicitly offers **Restore iDRAC Automatic
+Control**, **Keep current manual fan speed**, or **Don't quit**. Selecting
+restore sends the Dell automatic-control command; a failed restore leaves the
+app open so it cannot accidentally exit while manual control remains in place.
+Use the startup checkbox only if you explicitly want the saved curve applied at desktop login.
 “Launch app at desktop login” creates a per-user desktop autostart entry.
 Each temperature/RPM value pair is visually enclosed together; the tier title
 and field labels remain outside the outline.
@@ -98,9 +100,10 @@ The UI requires GTK 4 and PyGObject. Telemetry uses Linux `nvidia-smi` and
 
 Starting fan control sends the Dell raw IPMI command to enable manual mode,
 then sets all fan zones to the duty corresponding to the hottest GPU's selected
-curve tier. This is a hardware control, not a read-only action. The fan curve
-does not restore iDRAC automatic mode when stopped or when the application exits;
-the current manual duty is intentionally retained. If the app crashes, manual
-mode likewise remains in place. GPU-local temperature/power comes from
+curve tier. This is a hardware control, not a read-only action. **Stop (leave
+speed)** intentionally retains the current manual duty. A normal quit requires
+an explicit choice to restore iDRAC automatic control or keep that duty; a crash
+or forced termination cannot present the prompt and may leave manual mode in
+place. GPU-local temperature/power comes from
 `nvidia-smi`; BMC readings are chassis sensors and must not be mislabeled as GPU
 temperatures.

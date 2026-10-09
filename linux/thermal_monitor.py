@@ -39,6 +39,7 @@ from monitor_core import (
     parse_temperature_c,
     query_gpus,
     query_ipmi,
+    restore_ipmi_automatic_control,
     temperature_sensor_key,
     set_ipmi_fan_control,
     validate_fan_curve,
@@ -77,6 +78,8 @@ class ThermalMonitor(Gtk.Application):
         self.fan_control_lock = threading.Lock()
         self.fan_control_active = False
         self.fan_control_inflight = False
+        self.quit_dialog_open = False
+        self.allow_window_close = False
         self.fan_control_autostart_attempted = False
         self.latest_gpus: list[dict[str, Any]] = []
         self.fan_temperatures: list[int] = list(DEFAULT_FAN_TEMPERATURES)
@@ -473,7 +476,105 @@ class ThermalMonitor(Gtk.Application):
         # without pressing the explicit Apply Settings button.
         self._apply_fan_curve(report_result=False)
         self._save_window_position()
-        return False
+        if self.allow_window_close:
+            return False
+        if not self.quit_dialog_open:
+            self._show_quit_dialog()
+        return True
+
+    def _show_quit_dialog(self) -> None:
+        self.quit_dialog_open = True
+        dialog = Gtk.Dialog(
+            transient_for=self.window,
+            modal=True,
+            title="Exit Thermal Monitor",
+        )
+        dialog.set_default_size(530, 0)
+        content = dialog.get_content_area()
+        message = Gtk.Label(
+            label="Before quitting, choose how iDRAC should handle fan control.",
+            wrap=True,
+            xalign=0,
+        )
+        message.set_margin_top(12)
+        message.set_margin_bottom(12)
+        message.set_margin_start(12)
+        message.set_margin_end(12)
+        content.append(message)
+        dialog.add_button("Restore iDRAC Automatic Control", Gtk.ResponseType.YES)
+        dialog.add_button("Keep current manual fan speed", Gtk.ResponseType.NO)
+        dialog.add_button("Don't quit", Gtk.ResponseType.CANCEL)
+        dialog.set_default_response(Gtk.ResponseType.YES)
+        dialog.connect("response", self._on_quit_dialog_response)
+        dialog.present()
+
+    def _on_quit_dialog_response(self, dialog: Gtk.Dialog, response: int) -> None:
+        self.quit_dialog_open = False
+        dialog.close()
+        if response == Gtk.ResponseType.NO:
+            self.allow_window_close = True
+            self.window.close()
+        elif response == Gtk.ResponseType.YES:
+            self._restore_automatic_for_quit()
+
+    def _restore_automatic_for_quit(self) -> None:
+        if self.fan_control_inflight or self.fan_control_lock.locked():
+            self.bmc_status = "waiting for the current fan-control command before exit; try quitting again shortly"
+            self._render_status()
+            return
+        host = self.host_entry.get_text().strip()
+        username = self.username_entry.get_text().strip()
+        password = self.password_entry.get_text()
+        if not host or not username or not password:
+            self.bmc_status = "cannot restore iDRAC automatic control: enter BMC address, account name, and password first"
+            self._render_status()
+            self._show_restore_failed_dialog()
+            return
+        self.fan_control_inflight = True
+        self.fan_control_lock.acquire()
+        self.start_control_button.set_sensitive(False)
+        self.stop_control_button.set_sensitive(False)
+        self.bmc_status = "restoring iDRAC automatic fan control before exit…"
+        self._render_status()
+
+        def worker() -> None:
+            try:
+                restore_ipmi_automatic_control(host, username, password)
+                error = None
+            except Exception as exc:
+                error = str(exc)
+            GLib.idle_add(self._apply_quit_restore, error)
+
+        self.executor.submit(worker)
+
+    def _apply_quit_restore(self, error: str | None) -> bool:
+        self.fan_control_inflight = False
+        self.fan_control_lock.release()
+        if error:
+            self.bmc_status = f"could not restore iDRAC automatic control: {error}"
+            self.start_control_button.set_sensitive(True)
+            self.stop_control_button.set_sensitive(self.fan_control_active)
+            self._render_status()
+            self._show_restore_failed_dialog()
+            return GLib.SOURCE_REMOVE
+        self.fan_control_active = False
+        self.applied_fan_duty = None
+        self.bmc_status = "iDRAC automatic fan control restored; exiting."
+        self._render_status()
+        self.allow_window_close = True
+        self.window.close()
+        return GLib.SOURCE_REMOVE
+
+    def _show_restore_failed_dialog(self) -> None:
+        dialog = Gtk.MessageDialog(
+            transient_for=self.window,
+            modal=True,
+            buttons=Gtk.ButtonsType.OK,
+            text="iDRAC automatic fan control was not restored.",
+            secondary_text="Thermal Monitor remains open so you can correct the connection and try again.",
+        )
+        dialog.connect("response", lambda current, _response: current.close())
+        dialog.present()
 
     def _save_settings(self) -> None:
         current = self._current_settings()
@@ -1022,8 +1123,9 @@ class ThermalMonitor(Gtk.Application):
             attach_sensor(sensor, column * 2 + pair_row)
 
     def do_shutdown(self) -> None:
-        # Deliberately send no mode-reset or duty command: the BMC stays in
-        # manual mode at the last applied speed when this app exits.
+        # iDRAC mode was chosen explicitly in the quit dialog. A crash or
+        # non-interactive termination cannot show that dialog and may leave
+        # the BMC in manual mode at its last applied speed.
         self._save_window_position()
         self.fan_control_active = False
         self.password = ""
